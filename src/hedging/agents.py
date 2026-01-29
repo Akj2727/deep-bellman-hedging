@@ -22,13 +22,24 @@ def mlp(inp: int, out: int, hidden: int = 128) -> nn.Sequential:
 
 
 class Actor(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, max_hold: float):
+    """Outputs target holdings as Black-Scholes delta plus a learned, bounded adjustment.
+
+    The observation carries each asset's delta (columns 3k..4k). Starting from delta
+    means an untrained actor is already a sensible hedger, and the network only has to
+    learn how frictions and stochastic vol should move it away from delta.
+    """
+
+    def __init__(self, obs_dim: int, act_dim: int, max_hold: float, max_adjust: float = 0.5):
         super().__init__()
         self.net = mlp(obs_dim, act_dim)
-        self.max_hold = max_hold
+        nn.init.uniform_(self.net[-1].weight, -1e-3, 1e-3)
+        nn.init.zeros_(self.net[-1].bias)
+        self.k, self.max_hold, self.max_adjust = act_dim, max_hold, max_adjust
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.net(obs)) * self.max_hold
+        delta = obs[:, 3 * self.k: 4 * self.k]
+        adj = torch.tanh(self.net(obs)) * self.max_adjust
+        return (delta + adj).clamp(0.0, self.max_hold)
 
 
 class Critic(nn.Module):
@@ -117,7 +128,7 @@ class Agent:
         self.opt_c.step()
 
         self.updates += 1
-        info = {"critic_loss": float(critic_loss)}
+        info = {"critic_loss": critic_loss.item()}
         if not c.td3 or self.updates % c.policy_delay == 0:
             actor_loss = -self.critics[0](o, self.actor(o)).mean()
             self.opt_a.zero_grad()
@@ -125,7 +136,7 @@ class Agent:
             self.opt_a.step()
             self._soft_update(self.actor, self.actor_t)
             self._soft_update(self.critics, self.critics_t)
-            info["actor_loss"] = float(actor_loss)
+            info["actor_loss"] = actor_loss.item()
         return info
 
     @torch.no_grad()
