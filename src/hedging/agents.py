@@ -85,6 +85,7 @@ class AgentConfig:
     policy_delay: int = 2
     target_noise: float = 0.1
     target_noise_clip: float = 0.25
+    critic_warmup: int = 3000     # critic-only updates before the actor starts moving
 
 
 class Agent:
@@ -129,7 +130,10 @@ class Agent:
 
         self.updates += 1
         info = {"critic_loss": critic_loss.item()}
-        if not c.td3 or self.updates % c.policy_delay == 0:
+        actor_due = not c.td3 or self.updates % c.policy_delay == 0
+        if self.updates <= c.critic_warmup:
+            self._soft_update(self.critics, self.critics_t)
+        elif actor_due:
             actor_loss = -self.critics[0](o, self.actor(o)).mean()
             self.opt_a.zero_grad()
             actor_loss.backward()
