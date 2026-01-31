@@ -9,6 +9,7 @@ sensible actions.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import time
 from pathlib import Path
@@ -23,12 +24,13 @@ RESULTS = Path(__file__).resolve().parents[2] / "results"
 
 
 def train(agent: Agent, cfg: EnvConfig, episodes: int, n_envs: int = 64,
-          updates_per_step: int = 2, warmup_batches: int = 20, seed: int = 0,
-          log_every: int = 25) -> list[dict]:
+          updates_per_step: int = 6, warmup_batches: int = 20, seed: int = 0,
+          log_every: int = 5) -> list[dict]:
     g = torch.Generator().manual_seed(seed)
     env = HedgingEnv(cfg, n_envs, g)
     replay = Replay(env.obs_dim, env.k)
     log = []
+    best_score, best_state = float("-inf"), copy.deepcopy(agent.actor.state_dict())
     n_batches = episodes // n_envs
     for b in range(warmup_batches + n_batches):
         warm = b < warmup_batches
@@ -51,8 +53,11 @@ def train(agent: Agent, cfg: EnvConfig, episodes: int, n_envs: int = 64,
             ev = evaluate(agent_policy(agent), cfg, n_paths=2000, seed=999)
             ev["episodes"] = (b - warmup_batches + 1) * n_envs
             log.append(ev)
+            if ev["mean_variance"] > best_score:  # validation paths, separate from the test seed
+                best_score, best_state = ev["mean_variance"], copy.deepcopy(agent.actor.state_dict())
             print(f"{agent.name} ep {ev['episodes']:>6}  mean-var {ev['mean_variance']:.4f}  "
                   f"std {ev['std_pnl']:.3f}  cost {ev['mean_cost']:.3f}", flush=True)
+    agent.actor.load_state_dict(best_state)  # keep the best checkpoint on validation paths
     return log
 
 
@@ -70,7 +75,7 @@ def main() -> None:
         results[name] = evaluate(fn, cfg, args.eval_paths)
     for td3 in (False, True):
         agent = Agent(HedgingEnv(cfg, 1).obs_dim, cfg.heston.n_assets, cfg.max_hold,
-                      AgentConfig(td3=td3), seed=args.seed)
+                      AgentConfig(td3=td3, explore_noise=0.05, lr_actor=3e-5), seed=args.seed)
         t0 = time.time()
         curves[agent.name] = train(agent, cfg, args.episodes, seed=args.seed)
         res = evaluate(agent_policy(agent), cfg, args.eval_paths)
